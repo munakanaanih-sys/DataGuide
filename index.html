@@ -101,11 +101,11 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:20px}
     <button class="back" data-go="home">→ חזרה לדף הראשי</button>
 
     <div class="card">
-      <h3><span class="step">1</span>העלאת קובץ ת.ז מוורד (לא חובה)</h3>
+      <h3><span class="step">1</span>העלאת קובץ ת.ז – וורד או PDF (לא חובה)</h3>
       <p class="hint">הפלטפורמה תמלא את הטופס אוטומטית מתוך המסמך. אחר כך אפשר לבדוק ולתקן כל שדה.</p>
       <label class="drop" id="docDrop">
-        <input type="file" id="docFile" accept=".docx">
-        <div>📄 לחצי כאן או גררי קובץ Word (‎.docx‎)</div>
+        <input type="file" id="docFile" accept=".docx,.pdf">
+        <div>📄 לחצי כאן או גררי קובץ וורד (‎.docx‎) או PDF</div>
       </label>
       <div class="msg" id="docMsg"></div>
     </div>
@@ -167,11 +167,11 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:20px}
 
     <div class="card">
       <h3><span class="step">1</span>פרטי בית הספר</h3>
-      <p class="hint">אפשר לבחור בית ספר ששמרת כאן בעבר, להעלות את תיק בית הספר (קובץ האקסל של הת.ז), או למלא ידנית.</p>
+      <p class="hint">אפשר לבחור בית ספר ששמרת כאן בעבר, להעלות קובץ של בית הספר – תיק בית הספר באקסל, או קובץ הת.ז בוורד או PDF – או למלא ידנית.</p>
       <div class="grid">
         <div><label for="p_saved">בית ספר שמור</label><select id="p_saved"><option value="">— בחרי —</option></select></div>
-        <div><label>או העלאת תיק בית הספר</label>
-          <label class="drop" id="xlsDrop" style="padding:9px"><input type="file" id="xlsFile" accept=".xlsx"><div>📊 קובץ אקסל של בית הספר</div></label>
+        <div><label>או העלאת קובץ של בית הספר</label>
+          <label class="drop" id="xlsDrop" style="padding:9px"><input type="file" id="xlsFile" accept=".xlsx,.docx,.pdf"><div>📎 אקסל, וורד או PDF</div></label>
         </div>
       </div>
       <div class="msg" id="xlsMsg"></div>
@@ -408,15 +408,44 @@ function fillProtHeader(book,doc,h,start){
   for(const x of MONTHS) book.setCell(doc,"B"+x.r,`   חודש ${x.name} ${x.m}     ${yearFor(x.m,start)}`);
 }
 
-/* ---------- ID: Word import ---------- */
+/* ---------- reading school files: Word / PDF / Excel ---------- */
 function setupDrop(drop,input,handler){
-  input.addEventListener("change",()=>input.files[0]&&handler(input.files[0]));
+  input.addEventListener("change",()=>{ if(input.files[0]) handler(input.files[0]); input.value=""; });
   ["dragover","dragenter"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("over");}));
   ["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove("over");}));
   drop.addEventListener("drop",ev=>{ const f=ev.dataTransfer.files[0]; if(f) handler(f); });
 }
+const BIDI=/[​-‏‪-‮⁦-⁩]/g;
+const clean = s => (s||"").replace(BIDI,"").replace(/\s+/g," ").trim();
+const after = t => { const i=t.lastIndexOf(":"); return i>=0?t.slice(i+1).trim():""; };
+const extOf = f => ((f.name.match(/\.([^.]+)$/)||[])[1]||"").toLowerCase();
 
-async function readDocx(file){
+function parseDetailLines(lines,info){
+  for(const raw of lines){
+    const t=clean(raw);
+    if(!info.school && /שם בית (ה)?ספר/.test(t)) info.school=after(t);
+    else if(!info.principal && /שם (ה)?מנהל/.test(t)) info.principal=after(t);
+    else if(!info.day && /^יום\s*:/.test(t)) info.day=after(t);
+    else if(!info.hour && /^שעה/.test(t)){ const m=t.match(/\d{1,2}:\d{2}/); if(m) info.hour=m[0]; }
+    else if(!info.coord && /איש\s*\/\s*אשת הקשר|איש קשר|אשת קשר/.test(t)) info.coord=after(t).split(/\s+[-–]\s+/)[0].trim();
+    else if(!info.symbol && /סמל מוסד/.test(t)) info.symbol=after(t);
+    else if(!info.supervisor && /מפקח/.test(t)) info.supervisor=after(t);
+  }
+  for(const k of Object.keys(info)) if(!info[k]) delete info[k];
+}
+const joinDigits = v => clean(v).replace(/(\d)\s+(?=\d)/g,"$1").replace(/\.\s+(?=\d)/g,".");
+function finalizeSched(raw){
+  const all=Object.values(raw).flatMap(r=>[r.d1,r.d2]).map(joinDigits).join(" ");
+  const fm=all.match(/(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/);
+  const start=fm ? (+fm[2]>=8?+fm[3]:+fm[3]-1) : schoolYearStart();
+  const fix=v=>{ const c=joinDigits(v); return /^\d{1,2}[.\/-]\d{1,2}([.\/-]\d{2,4})?$/.test(c)?normDate(c,start):clean(v); };
+  const sched={};
+  for(const [m,r] of Object.entries(raw)) sched[m]={day:clean(r.day),d1:fix(r.d1),d2:fix(r.d2)};
+  return {sched,start};
+}
+
+/* Word (.docx) */
+async function extractDocx(file){
   const zip=await JSZip.loadAsync(file);
   const doc=parseXml(await zip.file("word/document.xml").async("string"));
   const body=doc.getElementsByTagName("w:body")[0];
@@ -425,66 +454,133 @@ async function readDocx(file){
   for(const ch of body.children){
     if(ch.nodeName==="w:p"){
       const hl=[...ch.getElementsByTagName("w:r")].filter(r=>r.getElementsByTagName("w:highlight").length||[...r.getElementsByTagName("w:shd")].some(s=>/^(FFFF00|yellow)$/i.test(s.getAttribute("w:fill")||""))).map(runText).join("");
-      paras.push({text:runText(ch).replace(/\s+/g," ").trim(),hl});
+      paras.push({text:clean(runText(ch)),hl});
     } else if(ch.nodeName==="w:tbl"){
-      const rows=[...ch.children].filter(e=>e.nodeName==="w:tr").map(tr=>[...tr.children].filter(e=>e.nodeName==="w:tc").map(tc=>[...tc.getElementsByTagName("w:p")].map(runText).join(" ").replace(/\s+/g," ").trim()));
-      tables.push(rows);
+      tables.push([...ch.children].filter(e=>e.nodeName==="w:tr").map(tr=>[...tr.children].filter(e=>e.nodeName==="w:tc").map(tc=>clean([...tc.getElementsByTagName("w:p")].map(runText).join(" ")))));
     }
   }
-  return {paras,tables};
+  const info={};
+  parseDetailLines(paras.map(p=>p.text),info);
+  const mp=paras.find(p=>/קיים מיפוי/.test(p.text));
+  if(mp) info.mapping=/כן/.test(mp.hl)?"כן":/לא/.test(mp.hl)?"לא":"";
+  info.tools=[]; let raw=null;
+  for(const tb of tables){
+    const h=tb[0]||[];
+    const iT=h.findIndex(x=>/כלי/.test(x)), iC=h.findIndex(x=>/מצוי/.test(x)), iD=h.findIndex(x=>/רצוי/.test(x));
+    if(iC>=0&&iD>=0) for(const r of tb.slice(1)){ const tool=r[iT>=0?iT:0]||""; if(tool) info.tools.push({tool,cur:r[iC]||"",des:r[iD]||""}); }
+    const iM=h.findIndex(x=>/חודש/.test(x)), i1=h.findIndex(x=>/מפגש\s*1/.test(x)), i2=h.findIndex(x=>/מפגש\s*2/.test(x)), iDay=h.findIndex(x=>/^יום$/.test(x));
+    if(iM>=0&&i1>=0){ raw={};
+      for(const r of tb.slice(1)){ const mo=MONTHS.find(x=>(r[iM]||"").includes(x.name)); if(mo) raw[mo.m]={day:iDay>=0?r[iDay]:"",d1:r[i1],d2:i2>=0?r[i2]:""}; } }
+  }
+  if(raw) Object.assign(info,finalizeSched(raw));
+  return info;
 }
-const after = t => { const i=t.lastIndexOf(":"); return i>=0?t.slice(i+1).trim():""; };
 
+/* PDF */
+const PDFJS="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+async function loadPdfJs(){
+  if(!window.pdfjsLib) await new Promise((res,rej)=>{ const s=document.createElement("script"); s.src=PDFJS+"pdf.min.js"; s.onload=res; s.onerror=()=>rej(new Error("pdf.js")); document.head.appendChild(s); });
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc=PDFJS+"pdf.worker.min.js";
+  return window.pdfjsLib;
+}
+async function extractPdf(file){
+  const lib=await loadPdfJs();
+  const pdf=await lib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;
+  const items=[]; let offset=0;
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p), vp=page.getViewport({scale:1}), tc=await page.getTextContent();
+    for(const it of tc.items){ const s=clean(it.str); if(!s) continue;
+      items.push({s, x:it.transform[4]+(it.width||0)/2, y:offset+(vp.height-it.transform[5])}); }
+    offset+=vp.height+50;
+  }
+  items.sort((a,b)=>a.y-b.y);
+  const lines=[];
+  for(const it of items){ const L=lines[lines.length-1]; if(L&&Math.abs(L.y-it.y)<3) L.items.push(it); else lines.push({y:it.y,items:[it]}); }
+  lines.forEach(l=>{ l.items.sort((a,b)=>b.x-a.x); l.text=clean(l.items.map(i=>i.s).join(" ")); });
+  const info={};
+  parseDetailLines(lines.map(l=>l.text),info);
+  // meeting schedule table
+  const hdr=lines.find(l=>(l.text.match(/מפגש/g)||[]).length>=2 && /חודש/.test(l.text));
+  if(hdr){
+    const meets=hdr.items.filter(i=>/מפגש/.test(i.s)).sort((a,b)=>b.x-a.x);
+    const anchors=hdr.items.map(i=>{
+      let label="x";
+      if(/מפגש/.test(i.s)) label=meets.indexOf(i)===0?"d1":"d2";
+      else if(/^\d$/.test(i.s)) { const n=meets.reduce((a,b)=>Math.abs(b.x-i.x)<Math.abs(a.x-i.x)?b:a); label=meets.indexOf(n)===0?"d1":"d2"; }
+      else if(/^יום$/.test(i.s)) label="day";
+      return {x:i.x,label};
+    });
+    const rows=[];
+    for(const it of items) if(it.y>hdr.y+4){ const mo=MONTHS.find(x=>it.s.includes(x.name)); if(mo&&!rows.some(r=>r.mo===mo)) rows.push({mo,y:it.y}); }
+    rows.sort((a,b)=>a.y-b.y);
+    const raw={};
+    rows.forEach((r,i)=>{
+      const top=r.y-6, bottom=i+1<rows.length?rows[i+1].y-6:r.y+(rows.length>1?(rows[rows.length-1].y-rows[0].y)/(rows.length-1):40)-6;
+      const cell={day:[],d1:[],d2:[]};
+      for(const it of items){ if(it.y<top||it.y>=bottom) continue;
+        const a=anchors.reduce((p,q)=>Math.abs(q.x-it.x)<Math.abs(p.x-it.x)?q:p);
+        if(cell[a.label]) cell[a.label].push(it); }
+      const txt=arr=>arr.sort((a,b)=>a.y-b.y||b.x-a.x).map(i=>i.s).join(" ");
+      raw[r.mo.m]={day:txt(cell.day),d1:txt(cell.d1),d2:txt(cell.d2)};
+    });
+    if(rows.length) Object.assign(info,finalizeSched(raw));
+  }
+  return info;
+}
+
+/* Excel school file (made by this platform / the template) */
+async function extractXlsx(file){
+  const book=await Book.open(await file.arrayBuffer());
+  const s=await book.sheet(SHEET_ID), p=await book.sheet(SHEET_PROT);
+  if(!s&&!p) return {};
+  const h={};
+  if(s){ h.school=book.getCell(s,"B3"); h.symbol=book.getCell(s,"B5"); h.principal=book.getCell(s,"B7"); h.coord=book.getCell(s,"B15");
+    h.sched={}; MONTHS.forEach((x,i)=>{ h.sched[x.m]={day:book.getCell(s,"L"+(8+i)),d1:book.getCell(s,"M"+(8+i)),d2:book.getCell(s,"N"+(8+i))}; }); }
+  if(p){ h.guide=book.getCell(p,"B4"); h.day=h.day||book.getCell(p,"B5");
+    h.school=h.school||book.getCell(p,"D4"); h.principal=h.principal||book.getCell(p,"D5"); h.coord=h.coord||book.getCell(p,"F5"); h.symbol=h.symbol||book.getCell(p,"F4"); }
+  for(const k of Object.keys(h)) if(!h[k]) delete h[k];
+  return h;
+}
+
+async function extractAny(file){
+  const ext=extOf(file);
+  if(ext==="docx") return extractDocx(file);
+  if(ext==="pdf") return extractPdf(file);
+  if(ext==="xlsx") return extractXlsx(file);
+  const e=new Error("type"); e.badType=ext; throw e;
+}
+function fileError(m,e){
+  console.error(e);
+  if(e.badType!==undefined) msg(m, e.badType==="doc"?"קובץ ‎.doc‎ ישן לא נתמך. פתחי אותו בוורד ושמרי מחדש כ-‎.docx‎.":"אפשר להעלות קובץ וורד (‎.docx‎), PDF או אקסל (‎.xlsx‎).","warn");
+  else if(String(e.message).includes("pdf.js")) msg(m,"לא הצלחתי לטעון את קורא ה-PDF. בדקי את החיבור לאינטרנט ונסי שוב.","warn");
+  else msg(m,"לא הצלחתי לקרוא את הקובץ. ודאי שהקובץ תקין ולא מוגן בסיסמה.","warn");
+}
+function schedCount(sc){ return sc?Object.values(sc).filter(r=>r.d1||r.d2).length:0; }
+
+/* ID screen: fill the questionnaire from the uploaded file */
 async function importWord(file){
   const m=$("docMsg");
-  if(!/\.docx$/i.test(file.name)){ msg(m,"יש להעלות קובץ Word בפורמט ‎.docx‎. קובץ PDF או ‎.doc‎ ישן לא נתמכים – אפשר לשמור אותו מחדש כ-docx.","warn"); return; }
   try{
-    const {paras,tables}=await readDocx(file);
+    const info=await extractAny(file);
     let filled=0; const set=(id,v)=>{ if(v){ $(id).value=v; filled++; } };
-    let mapping="";
-    for(const p of paras){
-      const t=p.text;
-      if(/שם בית ספר/.test(t)) set("i_school",after(t));
-      else if(/שם מנהל/.test(t)) set("i_principal",after(t));
-      else if(/^יום\s*:/.test(t)) set("i_day",after(t));
-      else if(/^שעה\s*:/.test(t)) set("i_hour",t.replace(/^שעה\s*:\s*/,""));
-      else if(/איש\/אשת הקשר|איש קשר/.test(t)) set("i_coord",after(t).split(/\s+-\s+/)[0]);
-      else if(/סמל מוסד/.test(t)) set("i_symbol",after(t));
-      else if(/מפקח/.test(t)) set("i_supervisor",after(t));
-      if(/קיים מיפוי/.test(t)) mapping=/כן/.test(p.hl)?"כן":/לא/.test(p.hl)?"לא":"";
-    }
-    // situation table: tool | current | desired
-    const tools=[];
-    for(const tb of tables){
-      const h=tb[0]||[]; const iT=h.findIndex(x=>/כלי/.test(x)), iC=h.findIndex(x=>/מצוי/.test(x)), iD=h.findIndex(x=>/רצוי/.test(x));
-      if(iC>=0&&iD>=0){ for(const r of tb.slice(1)){ const tool=(r[iT>=0?iT:0]||"").trim(); if(tool) tools.push({tool,cur:(r[iC]||"").trim(),des:(r[iD]||"").trim()}); } }
-      // schedule table
-      const iM=h.findIndex(x=>/חודש/.test(x)), i1=h.findIndex(x=>/מפגש\s*1/.test(x)), i2=h.findIndex(x=>/מפגש\s*2/.test(x)), iDay=h.findIndex(x=>/^יום$/.test(x));
-      if(iM>=0&&i1>=0){
-        const all=tb.slice(1).flatMap(r=>[r[i1],r[i2]]).join(" "); const ym=all.match(/\d{1,2}[.\/]\d{1,2}[.\/](\d{4})/);
-        const start = ym ? (()=>{ const d=all.match(/(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/); return +d[2]>=8?+d[3]:+d[3]-1; })() : schoolYearStart();
-        for(const r of tb.slice(1)){
-          const mo=MONTHS.find(x=>(r[iM]||"").includes(x.name)); if(!mo) continue;
-          const clean=v=>(v||"").replace(/\s+/g,"").replace(/^(\d+\.\d+\.)(\d{2})(\d{2})$/,"$1$2$3");
-          const fix=v=>{ const c=clean(v); return /\d/.test(c)?normDate(c,start):(v||"").trim(); };
-          $("s_d1_"+mo.m).value=fix(r[i1]); if(i2>=0) $("s_d2_"+mo.m).value=fix(r[i2]);
-          if(iDay>=0) $("s_day_"+mo.m).value=(r[iDay]||"").trim();
-          filled++;
-        }
-      }
-    }
+    set("i_school",info.school); set("i_principal",info.principal); set("i_day",info.day); set("i_hour",info.hour);
+    set("i_coord",info.coord); set("i_symbol",info.symbol); set("i_supervisor",info.supervisor);
+    if(info.guide) set("i_guide",info.guide);
+    if(info.sched) for(const [mo,r] of Object.entries(info.sched)){ if(r.day) $("s_day_"+mo).value=r.day; if(r.d1) $("s_d1_"+mo).value=r.d1; if(r.d2) $("s_d2_"+mo).value=r.d2; if(r.d1||r.d2) filled++; }
+    const tools=info.tools||[];
     if(tools.length){
-      const find=re=>tools.find(x=>re.test(x.tool));
-      const map=find(/מיפוי/);
-      set("q1",[mapping,map&&map.cur].filter(Boolean).join(". "));
+      const map=tools.find(x=>/מיפוי/.test(x.tool));
+      set("q1",[info.mapping,map&&map.cur].filter(Boolean).join(". "));
       set("q2",tools.filter(x=>x.cur&&!/חיצוני/.test(x.cur)||x.cur&&/פנימי/.test(x.cur)).map(x=>`• ${x.tool}: ${x.cur}`).join("\n"));
       set("q3",tools.filter(x=>/חיצוני/.test(x.cur)).map(x=>`• ${x.tool}: ${x.cur}`).join("\n"));
       if(map) set("q4",[map.cur,map.des&&("יעד: "+map.des)].filter(Boolean).join("\n"));
       const goals=tools.filter(x=>x.des).map(x=>`• ${x.tool}: ${x.des}`);
       if(goals.length) set("q5","יעדים לשנה:\n"+goals.join("\n"));
-    } else if(mapping) set("q1",mapping);
-    msg(m, filled?`מילאתי ${filled} שדות מתוך המסמך. כדאי לעבור על הטופס ולהשלים את מה שחסר.`:"לא מצאתי במסמך שדות מוכרים. אפשר למלא את הטופס ידנית.", filled?"ok":"warn");
-  }catch(e){ console.error(e); msg(m,"לא הצלחתי לקרוא את הקובץ. ודאי שזה קובץ Word תקין.","warn"); }
+    } else if(info.mapping) set("q1",info.mapping);
+    let text = filled?`מילאתי ${filled} שדות מתוך הקובץ. כדאי לעבור על הטופס ולהשלים את מה שחסר.`:"לא מצאתי בקובץ שדות מוכרים. אפשר למלא את הטופס ידנית.";
+    if(filled && extOf(file)==="pdf") text+=" מקובץ PDF נשלפים הפרטים ולוח המפגשים בלבד; את תשובות השאלון אפשר לשלוף אוטומטית רק מקובץ וורד.";
+    msg(m,text,filled?"ok":"warn");
+  }catch(e){ fileError(m,e); }
 }
 setupDrop($("docDrop"),$("docFile"),importWord);
 
@@ -542,17 +638,15 @@ $("p_saved").addEventListener("change",e=>{ const s=store.get("schools",{})[e.ta
 setupDrop($("xlsDrop"),$("xlsFile"),async file=>{
   const m=$("xlsMsg");
   try{
-    const book=await Book.open(await file.arrayBuffer());
-    const s=await book.sheet(SHEET_ID), p=await book.sheet(SHEET_PROT);
-    if(!s&&!p){ msg(m,"זה לא נראה כמו תיק בית ספר מהשבלונה. אפשר למלא את הפרטים ידנית.","warn"); return; }
-    const h={};
-    if(s){ h.school=book.getCell(s,"B3"); h.symbol=book.getCell(s,"B5"); h.principal=book.getCell(s,"B7"); h.coord=book.getCell(s,"B15");
-      h.sched={}; MONTHS.forEach((x,i)=>{ h.sched[x.m]={day:book.getCell(s,"L"+(8+i)),d1:book.getCell(s,"M"+(8+i)),d2:book.getCell(s,"N"+(8+i))}; }); }
-    if(p){ h.guide=book.getCell(p,"B4"); h.day=book.getCell(p,"B5"); if(!h.school) h.school=book.getCell(p,"D4"); if(!h.principal) h.principal=book.getCell(p,"D5"); if(!h.coord) h.coord=book.getCell(p,"F5"); if(!h.symbol) h.symbol=book.getCell(p,"F4"); }
+    const h=await extractAny(file);
+    const got=[["school","שם בית הספר"],["principal","מנהל/ת"],["coord","רכז/ת הערכה"],["day","יום ההדרכה"],["guide","שם המדריכה"],["symbol","סמל מוסד"]].filter(([k])=>h[k]).map(([,l])=>l);
+    const n=schedCount(h.sched); if(n) got.push(`לוח המפגשים (${n} חודשים)`);
+    if(!got.length){ msg(m,"לא מצאתי בקובץ פרטים של בית הספר. אפשר למלא אותם ידנית.","warn"); return; }
+    delete h.tools; delete h.mapping;
     fillProtSchool(h);
     if(h.school){ const schools=store.get("schools",{}); schools[h.school]=Object.assign(schools[h.school]||{},h); store.set("schools",schools); refreshSaved(); $("p_saved").value=h.school; }
-    msg(m,`הפרטים של ${h.school||"בית הספר"} נטענו מהקובץ.`,"ok");
-  }catch(e){ console.error(e); msg(m,"לא הצלחתי לקרוא את קובץ האקסל.","warn"); }
+    msg(m,`נטענו מהקובץ: ${got.join(", ")}. בדקי את הפרטים ותקני אם צריך.`,"ok");
+  }catch(e){ fileError(m,e); }
 });
 
 /* ---------- Protocol: meeting slot detection ---------- */
